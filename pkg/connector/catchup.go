@@ -47,10 +47,12 @@ func slackTimestampAfter(a, b string) bool {
 }
 
 // planCatchUp decides what a catch-up has to fetch for one channel.
-//
 // history is conversations.history, newest first. lastBridgedTS is the timestamp of the newest bridged message in
-// the portal ("" if the portal has none). lastThreadReply reports the newest bridged message of a thread (the parent
-// itself if no reply is bridged), or false if nothing of the thread is bridged.
+// the portal ("" if the portal has none). lastThreadReply reports the newest bridged message of a thread, or false
+// if nothing of the thread was ever bridged: no reply to that parent was ever stored, which (for a parent at or
+// before lastBridgedTS) means the thread's replies predate the portal's bridged history. In that case the anchor is
+// lastBridgedTS instead of the parent, since any reply posted while the bridge was connected would have been
+// bridged and stored, so replies at or before lastBridgedTS were not missed during this disconnection.
 //
 // latestTS is the newest message in history, to be passed to the chat resync so that bridgev2 forward-backfills
 // the main timeline. threads lists the threads whose parents are at or before lastBridgedTS and inside the window,
@@ -71,13 +73,14 @@ func planCatchUp(
 	for _, msg := range history {
 		isParent := msg.ReplyCount > 0 && (msg.ThreadTimestamp == "" || msg.ThreadTimestamp == msg.Timestamp)
 		if !isParent ||
+			msg.LatestReply == "" ||
 			slackid.ParseSlackTimestamp(msg.Timestamp).Before(windowStart) ||
 			slackTimestampAfter(msg.Timestamp, lastBridgedTS) {
 			continue
 		}
 		anchor, ok := lastThreadReply(msg.Timestamp)
 		if !ok {
-			anchor = msg.Timestamp
+			anchor = lastBridgedTS
 		}
 		if slackTimestampAfter(msg.LatestReply, anchor) {
 			threads = append(threads, threadCatchUp{ParentTS: msg.Timestamp, OldestTS: anchor})
@@ -113,12 +116,15 @@ func (t *socketModeGapTracker) reconnected(now time.Time) bool {
 	return endedGap
 }
 
-// reset forgets the connection state, for a fresh connect.
-func (t *socketModeGapTracker) reset() {
+// reset forgets the connection state, for a fresh connect. It starts in the lost state with lostAt = now, so that
+// a first EventTypeConnected arriving more than socketModeCatchUpGap after the connect call also triggers a
+// catch-up: Socket Mode may take that long to deliver its first EventTypeConnected, and Slack does not retry
+// events that were missed before any connection was ever established.
+func (t *socketModeGapTracker) reset(now time.Time) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	t.connected = false
-	t.lostAt = time.Time{}
+	t.lostAt = now
 }
 
 type appCatchUpStats struct {
@@ -157,7 +163,8 @@ func (s *SlackClient) triggerAppCatchUp(ctx context.Context) {
 func (s *SlackClient) runAppCatchUp(ctx context.Context) {
 	log := zerolog.Ctx(ctx).With().Str("action", "app catch-up").Logger()
 	ctx = log.WithContext(ctx)
-	if s.Client == nil {
+	cli := s.Client
+	if cli == nil {
 		return
 	}
 	start := time.Now()
@@ -177,8 +184,12 @@ func (s *SlackClient) runAppCatchUp(ctx context.Context) {
 			continue
 		}
 		stats.rooms++
-		err = s.catchUpPortal(ctx, up.Portal, channelID, windowStart, &stats)
+		err = s.catchUpPortal(ctx, cli, up.Portal, channelID, windowStart, &stats)
 		if err != nil {
+			if ctx.Err() != nil {
+				log.Debug().Err(err).Str("channel_id", channelID).Msg("Catch-up cancelled")
+				return
+			}
 			switch slackAPIErrorCode(err) {
 			case "channel_not_found", "not_in_channel":
 				log.Debug().Err(err).Str("channel_id", channelID).Msg("Skipping catch-up of a channel the user is not in")
@@ -198,12 +209,13 @@ func (s *SlackClient) runAppCatchUp(ctx context.Context) {
 
 func (s *SlackClient) catchUpPortal(
 	ctx context.Context,
+	cli *slack.Client,
 	portalKey networkid.PortalKey,
 	channelID string,
 	windowStart time.Time,
 	stats *appCatchUpStats,
 ) error {
-	history, err := s.fetchHistorySince(ctx, channelID, windowStart)
+	history, err := s.fetchHistorySince(ctx, cli, channelID, windowStart)
 	if err != nil {
 		return err
 	}
@@ -234,7 +246,7 @@ func (s *SlackClient) catchUpPortal(
 	}
 	for _, thread := range threads {
 		stats.threads++
-		dispatched, err := s.dispatchMissedReplies(ctx, channelID, thread)
+		dispatched, err := s.dispatchMissedReplies(ctx, cli, channelID, thread)
 		stats.replies += dispatched
 		if err != nil {
 			return fmt.Errorf("failed to fetch replies of thread %s: %w", thread.ParentTS, err)
@@ -245,11 +257,11 @@ func (s *SlackClient) catchUpPortal(
 
 // fetchHistorySince reads conversations.history newest first until a page reaches a message older than windowStart.
 // The first page is always returned, so the newest message is known even in quiet channels.
-func (s *SlackClient) fetchHistorySince(ctx context.Context, channelID string, windowStart time.Time) ([]slack.Message, error) {
+func (s *SlackClient) fetchHistorySince(ctx context.Context, cli *slack.Client, channelID string, windowStart time.Time) ([]slack.Message, error) {
 	params := &slack.GetConversationHistoryParameters{ChannelID: channelID, Limit: 200}
 	var history []slack.Message
 	for range maxSlackPaginationPages {
-		resp, err := s.Client.GetConversationHistoryContext(ctx, params)
+		resp, err := cli.GetConversationHistoryContext(ctx, params)
 		if err != nil {
 			return nil, err
 		}
@@ -265,7 +277,7 @@ func (s *SlackClient) fetchHistorySince(ctx context.Context, channelID string, w
 
 // dispatchMissedReplies fetches the replies of a thread newer than thread.OldestTS and handles them like
 // Socket Mode message events. bridgev2 ignores replies that are already bridged.
-func (s *SlackClient) dispatchMissedReplies(ctx context.Context, channelID string, thread threadCatchUp) (int, error) {
+func (s *SlackClient) dispatchMissedReplies(ctx context.Context, cli *slack.Client, channelID string, thread threadCatchUp) (int, error) {
 	params := &slack.GetConversationRepliesParameters{
 		GetConversationHistoryParameters: slack.GetConversationHistoryParameters{
 			ChannelID: channelID,
@@ -276,7 +288,7 @@ func (s *SlackClient) dispatchMissedReplies(ctx context.Context, channelID strin
 	}
 	dispatched := 0
 	for range maxSlackPaginationPages {
-		resp, err := s.Client.GetConversationRepliesContext(ctx, params)
+		resp, err := cli.GetConversationRepliesContext(ctx, params)
 		if err != nil {
 			return dispatched, err
 		}

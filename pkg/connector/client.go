@@ -395,7 +395,7 @@ func (s *SlackClient) connect(ctx context.Context, bootCancel *context.CancelFun
 		go rtm.ManageConnection()
 		go s.resyncUsers(ctx)
 	} else {
-		s.socketGap.reset()
+		s.socketGap.reset(time.Now())
 		go s.consumeSocketModeEvents(ctx)
 		go s.runSocketMode(ctx, cancel)
 	}
