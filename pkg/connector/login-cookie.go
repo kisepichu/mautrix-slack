@@ -43,7 +43,7 @@ func (s *SlackConnector) GetLoginFlows() []bridgev2.LoginFlow {
 		ID:          LoginFlowIDAuthToken,
 	}, {
 		Name:        "Slack app",
-		Description: "Log in with a Slack app",
+		Description: "Log in with a Slack app's bot token, or its user token to puppet your own account",
 		ID:          LoginFlowIDApp,
 	}}
 }

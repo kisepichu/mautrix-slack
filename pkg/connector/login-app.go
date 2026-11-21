@@ -43,9 +43,9 @@ func (s *SlackAppLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) 
 			Fields: []bridgev2.LoginInputDataField{{
 				Type:        bridgev2.LoginInputFieldTypeToken,
 				ID:          "bot_token",
-				Name:        "Bot token",
-				Description: "Slack bot token for the workspace (starts with `xoxb-`)",
-				Pattern:     "^xoxb-.+$",
+				Name:        "Bot or user token",
+				Description: "Slack bot token (starts with `xoxb-`) or user token (starts with `xoxp-`) for the workspace",
+				Pattern:     "^xox[bp]-.+$",
 			}, {
 				Type:        bridgev2.LoginInputFieldTypeToken,
 				ID:          "app_token",
