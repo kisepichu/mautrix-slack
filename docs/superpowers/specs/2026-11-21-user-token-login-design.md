@@ -136,8 +136,9 @@ func planCatchUp(
 
 - `conversations.history` and `conversations.replies` are Tier 3 for internal apps, so they keep 50+ requests per
   minute.
-- On `*slack.RateLimitedError`, wait for its `RetryAfter` (or until the context is cancelled) and retry the same
-  request. After 5 attempts, give up on that room.
+- 429 responses are already retried by the Slack client: `makeSlackClient` sets `slack.OptionRetry(slackMaxRetries)`
+  (5), which waits for `Retry-After` before each retry. If a call still fails with `*slack.RateLimitedError`, give up
+  on that room as with any other error. The catch-up adds no retry loop of its own.
 - `channel_not_found` or `not_in_channel` means the user has left the channel: skip the room at debug level. Any other
   error is logged with the channel ID, and the run continues with the next room.
 - At the end, log a summary at info level: rooms checked, rooms with missed top-level messages, threads read,
@@ -191,8 +192,6 @@ A new file. The existing `app-manifest.yaml` (bot) stays unchanged.
   - A parent older than the window is skipped.
   - Empty history gives an empty `latestTS`.
   - Timestamps with different digit counts compare numerically.
-- The rate-limit retry, against an `httptest` server that first answers 429 with `Retry-After`: it waits and then
-  succeeds, and it stops after 5 attempts.
 - `go test ./...` passes, including upstream's tests.
 
 ### Manual (personal test workspace)
