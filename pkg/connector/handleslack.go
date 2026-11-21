@@ -176,11 +176,19 @@ func (s *SlackClient) HandleSlackEvent(ctx context.Context, rawEvt any) {
 func (s *SlackClient) HandleSocketModeEvent(ctx context.Context, evt socketmode.Event) {
 	switch evt.Type {
 	case socketmode.EventTypeConnecting:
+		s.socketGap.lost(time.Now())
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
 	case socketmode.EventTypeConnectionError:
+		s.socketGap.lost(time.Now())
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: "slack-socketmode-connection-error"})
+	case socketmode.EventTypeDisconnect:
+		s.socketGap.lost(time.Now())
 	case socketmode.EventTypeConnected:
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+		if s.socketGap.reconnected(time.Now()) {
+			s.UserLogin.Log.Info().Msg("Socket Mode reconnected after a long disconnection, catching up")
+			s.triggerAppCatchUp(ctx)
+		}
 	case socketmode.EventTypeEventsAPI:
 		eaEvt, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {

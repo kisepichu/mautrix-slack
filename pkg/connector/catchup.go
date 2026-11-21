@@ -17,10 +17,14 @@
 package connector
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/slack-go/slack"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 
 	"go.mau.fi/mautrix-slack/pkg/slackid"
 )
@@ -115,4 +119,180 @@ func (t *socketModeGapTracker) reset() {
 	defer t.lock.Unlock()
 	t.connected = false
 	t.lostAt = time.Time{}
+}
+
+type appCatchUpStats struct {
+	rooms           int
+	roomsWithMissed int
+	threads         int
+	replies         int
+}
+
+// triggerAppCatchUp starts a catch-up for an app login. If one is already running, it runs once more afterwards.
+func (s *SlackClient) triggerAppCatchUp(ctx context.Context) {
+	s.catchUpLock.Lock()
+	if s.catchUpRunning {
+		s.catchUpPending = true
+		s.catchUpLock.Unlock()
+		return
+	}
+	s.catchUpRunning = true
+	s.catchUpLock.Unlock()
+	go func() {
+		for {
+			s.runAppCatchUp(ctx)
+			s.catchUpLock.Lock()
+			if !s.catchUpPending || ctx.Err() != nil {
+				s.catchUpRunning = false
+				s.catchUpPending = false
+				s.catchUpLock.Unlock()
+				return
+			}
+			s.catchUpPending = false
+			s.catchUpLock.Unlock()
+		}
+	}()
+}
+
+func (s *SlackClient) runAppCatchUp(ctx context.Context) {
+	log := zerolog.Ctx(ctx).With().Str("action", "app catch-up").Logger()
+	ctx = log.WithContext(ctx)
+	if s.Client == nil {
+		return
+	}
+	start := time.Now()
+	userPortals, err := s.UserLogin.Bridge.DB.UserPortal.GetAllForLogin(ctx, s.UserLogin.UserLogin)
+	if err != nil {
+		log.Err(err).Msg("Failed to fetch user portals")
+		return
+	}
+	windowStart := start.Add(-threadCatchUpWindow)
+	var stats appCatchUpStats
+	for _, up := range userPortals {
+		if ctx.Err() != nil {
+			return
+		}
+		_, channelID := slackid.ParsePortalID(up.Portal.ID)
+		if channelID == "" {
+			continue
+		}
+		stats.rooms++
+		err = s.catchUpPortal(ctx, up.Portal, channelID, windowStart, &stats)
+		if err != nil {
+			switch slackAPIErrorCode(err) {
+			case "channel_not_found", "not_in_channel":
+				log.Debug().Err(err).Str("channel_id", channelID).Msg("Skipping catch-up of a channel the user is not in")
+			default:
+				log.Err(err).Str("channel_id", channelID).Msg("Failed to catch up channel")
+			}
+		}
+	}
+	log.Info().
+		Int("rooms_checked", stats.rooms).
+		Int("rooms_with_missed_messages", stats.roomsWithMissed).
+		Int("threads_read", stats.threads).
+		Int("replies_dispatched", stats.replies).
+		Dur("duration", time.Since(start)).
+		Msg("Finished catch-up")
+}
+
+func (s *SlackClient) catchUpPortal(
+	ctx context.Context,
+	portalKey networkid.PortalKey,
+	channelID string,
+	windowStart time.Time,
+	stats *appCatchUpStats,
+) error {
+	history, err := s.fetchHistorySince(ctx, channelID, windowStart)
+	if err != nil {
+		return err
+	}
+	msgDB := s.UserLogin.Bridge.DB.Message
+	var lastBridgedTS string
+	lastBridged, err := msgDB.GetLastNonFakePartAtOrBeforeTime(ctx, portalKey, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to get last bridged message: %w", err)
+	} else if lastBridged != nil {
+		_, _, lastBridgedTS, _ = slackid.ParseMessageID(lastBridged.ID)
+	}
+	latestTS, threads := planCatchUp(history, lastBridgedTS, windowStart, func(parentTS string) (string, bool) {
+		threadMsg, err := msgDB.GetLastThreadMessage(ctx, portalKey, slackid.MakeMessageID(s.TeamID, channelID, parentTS))
+		if err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("thread_ts", parentTS).Msg("Failed to get last bridged thread message")
+			return "", false
+		} else if threadMsg == nil {
+			return "", false
+		}
+		_, _, ts, ok := slackid.ParseMessageID(threadMsg.ID)
+		return ts, ok
+	})
+	if latestTS != "" {
+		if lastBridgedTS == "" || slackTimestampAfter(latestTS, lastBridgedTS) {
+			stats.roomsWithMissed++
+		}
+		s.queueCatchUpResync(portalKey, map[string]string{channelID: latestTS})
+	}
+	for _, thread := range threads {
+		stats.threads++
+		dispatched, err := s.dispatchMissedReplies(ctx, channelID, thread)
+		stats.replies += dispatched
+		if err != nil {
+			return fmt.Errorf("failed to fetch replies of thread %s: %w", thread.ParentTS, err)
+		}
+	}
+	return nil
+}
+
+// fetchHistorySince reads conversations.history newest first until a page reaches a message older than windowStart.
+// The first page is always returned, so the newest message is known even in quiet channels.
+func (s *SlackClient) fetchHistorySince(ctx context.Context, channelID string, windowStart time.Time) ([]slack.Message, error) {
+	params := &slack.GetConversationHistoryParameters{ChannelID: channelID, Limit: 200}
+	var history []slack.Message
+	for range maxSlackPaginationPages {
+		resp, err := s.Client.GetConversationHistoryContext(ctx, params)
+		if err != nil {
+			return nil, err
+		}
+		history = append(history, resp.Messages...)
+		if !resp.HasMore || resp.ResponseMetadata.Cursor == "" || len(resp.Messages) == 0 ||
+			slackid.ParseSlackTimestamp(resp.Messages[len(resp.Messages)-1].Timestamp).Before(windowStart) {
+			break
+		}
+		params.Cursor = resp.ResponseMetadata.Cursor
+	}
+	return history, nil
+}
+
+// dispatchMissedReplies fetches the replies of a thread newer than thread.OldestTS and handles them like
+// Socket Mode message events. bridgev2 ignores replies that are already bridged.
+func (s *SlackClient) dispatchMissedReplies(ctx context.Context, channelID string, thread threadCatchUp) (int, error) {
+	params := &slack.GetConversationRepliesParameters{
+		GetConversationHistoryParameters: slack.GetConversationHistoryParameters{
+			ChannelID: channelID,
+			Oldest:    thread.OldestTS,
+			Limit:     200,
+		},
+		Timestamp: thread.ParentTS,
+	}
+	dispatched := 0
+	for range maxSlackPaginationPages {
+		resp, err := s.Client.GetConversationRepliesContext(ctx, params)
+		if err != nil {
+			return dispatched, err
+		}
+		for i := range resp.Messages {
+			reply := &resp.Messages[i]
+			if reply.Timestamp == thread.ParentTS || !slackTimestampAfter(reply.Timestamp, thread.OldestTS) {
+				continue
+			}
+			reply.Channel = channelID
+			s.HandleSlackEvent(ctx, (*slack.MessageEvent)(reply))
+			dispatched++
+		}
+		if !resp.HasMore || resp.ResponseMetadata.Cursor == "" {
+			break
+		}
+		params.Cursor = resp.ResponseMetadata.Cursor
+	}
+	return dispatched, nil
 }

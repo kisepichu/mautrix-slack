@@ -156,6 +156,11 @@ type SlackClient struct {
 	initialConnect   time.Time
 	rtmHelloReceived atomic.Bool
 
+	socketGap      socketModeGapTracker
+	catchUpLock    sync.Mutex
+	catchUpRunning bool
+	catchUpPending bool
+
 	fileCreatedListeners *exsync.Map[string, chan struct{}]
 
 	chatInfoCache          map[string]chatInfoCacheEntry
@@ -390,11 +395,15 @@ func (s *SlackClient) connect(ctx context.Context, bootCancel *context.CancelFun
 		go rtm.ManageConnection()
 		go s.resyncUsers(ctx)
 	} else {
+		s.socketGap.reset()
 		go s.consumeSocketModeEvents(ctx)
 		go s.runSocketMode(ctx, cancel)
 	}
 	go s.SyncEmojis(ctx)
 	go s.syncChannels(ctx, prefetchedChannels, prefetched)
+	if !s.IsRealUser {
+		s.triggerAppCatchUp(ctx)
+	}
 	return nil
 }
 
