@@ -28,7 +28,9 @@ To puppet your own account without browser cookies, use an internal Slack app wi
 4. Send `login app` to the bridge bot and paste both tokens.
 
 Messages you send through the bridge are posted as you. The API marks them with the app's `app_id`, and workspace
-admins can see and remove the app. Read receipts and typing notifications are not sent with this login.
+admins can see and remove the app. Read receipts and typing notifications are not sent with this login. After a
+restart or a long disconnection, missed thread replies are always caught up; missed top-level messages are caught
+up only if `backfill.enabled: true` is set in the bridge config.
 
 ## Discussion
 Matrix room: [#slack:maunium.net](https://matrix.to/#/#slack:maunium.net)
