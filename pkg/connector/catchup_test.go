@@ -98,6 +98,11 @@ func TestSocketModeGapTracker(t *testing.T) {
 	tr.reset(t0)
 	assert.True(t, tr.reconnected(t0.Add(2*time.Minute)), "connection after the gap following reset triggers")
 
+	// slackgo emits EventTypeConnecting before the first EventTypeConnected; the gap is still measured from reset.
+	tr.reset(t0)
+	tr.lost(t0.Add(50 * time.Second))
+	assert.True(t, tr.reconnected(t0.Add(70*time.Second)), "a loss event before the first connection keeps the reset time")
+
 	tr.lost(t0.Add(3 * time.Minute))
 	assert.False(t, tr.reconnected(t0.Add(3*time.Minute+30*time.Second)), "short gap")
 

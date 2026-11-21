@@ -49,10 +49,11 @@ func slackTimestampAfter(a, b string) bool {
 // planCatchUp decides what a catch-up has to fetch for one channel.
 // history is conversations.history, newest first. lastBridgedTS is the timestamp of the newest bridged message in
 // the portal ("" if the portal has none). lastThreadReply reports the newest bridged message of a thread, or false
-// if nothing of the thread was ever bridged: no reply to that parent was ever stored, which (for a parent at or
-// before lastBridgedTS) means the thread's replies predate the portal's bridged history. In that case the anchor is
-// lastBridgedTS instead of the parent, since any reply posted while the bridge was connected would have been
-// bridged and stored, so replies at or before lastBridgedTS were not missed during this disconnection.
+// if nothing of the thread was ever bridged: neither a reply to that parent nor the parent itself was ever stored,
+// which (for a parent at or before lastBridgedTS) means the thread's replies predate the portal's bridged history.
+// In that case the anchor is lastBridgedTS instead of the parent, since any reply posted while the bridge was
+// connected would have been bridged and stored, so replies at or before lastBridgedTS were not missed during this
+// disconnection.
 //
 // latestTS is the newest message in history, to be passed to the chat resync so that bridgev2 forward-backfills
 // the main timeline. threads lists the threads whose parents are at or before lastBridgedTS and inside the window,
@@ -118,8 +119,8 @@ func (t *socketModeGapTracker) reconnected(now time.Time) bool {
 
 // reset forgets the connection state, for a fresh connect. It starts in the lost state with lostAt = now, so that
 // a first EventTypeConnected arriving more than socketModeCatchUpGap after the connect call also triggers a
-// catch-up: Socket Mode may take that long to deliver its first EventTypeConnected, and Slack does not retry
-// events that were missed before any connection was ever established.
+// catch-up. This is the same as a reconnect: the startup catch-up covers what came before it, and Slack's retries
+// cover only a short gap after it.
 func (t *socketModeGapTracker) reset(now time.Time) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
@@ -170,6 +171,10 @@ func (s *SlackClient) runAppCatchUp(ctx context.Context) {
 	start := time.Now()
 	userPortals, err := s.UserLogin.Bridge.DB.UserPortal.GetAllForLogin(ctx, s.UserLogin.UserLogin)
 	if err != nil {
+		if ctx.Err() != nil {
+			log.Debug().Err(err).Msg("Catch-up cancelled")
+			return
+		}
 		log.Err(err).Msg("Failed to fetch user portals")
 		return
 	}
@@ -230,7 +235,9 @@ func (s *SlackClient) catchUpPortal(
 	latestTS, threads := planCatchUp(history, lastBridgedTS, windowStart, func(parentTS string) (string, bool) {
 		threadMsg, err := msgDB.GetLastThreadMessage(ctx, portalKey, slackid.MakeMessageID(s.TeamID, channelID, parentTS))
 		if err != nil {
-			zerolog.Ctx(ctx).Warn().Err(err).Str("thread_ts", parentTS).Msg("Failed to get last bridged thread message")
+			if ctx.Err() == nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Str("thread_ts", parentTS).Msg("Failed to get last bridged thread message")
+			}
 			return "", false
 		} else if threadMsg == nil {
 			return "", false
