@@ -442,6 +442,11 @@ func (s *SlackClient) consumeSocketModeEvents(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case evt := <-eventChan:
+			// The connection may have been cancelled (logout, invalidated credentials) while this event was
+			// queued. Handling it would send a stale connecting/transient state after the final one.
+			if ctx.Err() != nil {
+				return
+			}
 			s.HandleSocketModeEvent(ctx, evt)
 		}
 	}
