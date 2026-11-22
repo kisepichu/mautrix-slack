@@ -186,8 +186,8 @@ A new file. The existing `app-manifest.yaml` (bot) stays unchanged.
   `team_disabled`, `user_removed_from_team`, also when an admin removes the app): the login is invalidated (or
   disconnected until restart, for the account and team codes) and a bad-credentials bridge state is sent. No
   automatic re-login. Upstream does this only when connecting fails, so running app logins also detect revocation:
-  - A credential error from Socket Mode ends the connection and invalidates the login, instead of retrying every
-    10 seconds with a transient-disconnect state.
+  - A credential error reported by Socket Mode (returned by the connection or sent as a connection error) ends the
+    connection, instead of retrying with a transient-disconnect state.
   - An `auth.test` runs on every Socket Mode connection, because Socket Mode uses only the app-level token. A
     revoked bot or user token is noticed at the next connection at the latest; Slack refreshes Socket Mode
     connections periodically. Other `auth.test` errors are logged and the login keeps running.

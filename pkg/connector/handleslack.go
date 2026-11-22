@@ -180,7 +180,12 @@ func (s *SlackClient) HandleSocketModeEvent(ctx context.Context, evt socketmode.
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
 	case socketmode.EventTypeConnectionError:
 		s.socketGap.lost(time.Now())
-		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: "slack-socketmode-connection-error"})
+		if connErr, ok := evt.Data.(*slack.ConnectionErrorEvent); ok && isSlackCredentialError(connErr.ErrorObj) {
+			// slackgo retries these forever, so stop the connection here.
+			s.handleConnectError(ctx, connErr.ErrorObj, 0)
+		} else {
+			s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect, Error: "slack-socketmode-connection-error"})
+		}
 	case socketmode.EventTypeDisconnect:
 		s.socketGap.lost(time.Now())
 	case socketmode.EventTypeConnected:

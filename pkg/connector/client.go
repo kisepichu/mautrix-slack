@@ -496,6 +496,10 @@ func (s *SlackClient) runSocketMode(ctx context.Context, cancel context.CancelFu
 	log := zerolog.Ctx(ctx)
 	for ctx.Err() == nil {
 		err := s.SocketMode.RunContext(ctx)
+		if ctx.Err() != nil {
+			// Disconnected, logged out, replaced or invalidated: whoever canceled the context owns the state.
+			return
+		}
 		//lint:ignore SA4023 -
 		if err != nil {
 			if isSlackCredentialError(err) {
