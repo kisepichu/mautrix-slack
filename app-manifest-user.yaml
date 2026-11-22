@@ -20,6 +20,7 @@ oauth_config:
       - users:read
       - emoji:read
       - team:read
+      - usergroups:read
 settings:
   event_subscriptions:
     user_events:

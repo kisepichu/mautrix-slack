@@ -162,7 +162,7 @@ A new file. The existing `app-manifest.yaml` (bot) stays unchanged.
   - `channels:history`, `channels:read`, `groups:history`, `groups:read`
   - `im:history`, `im:read`, `mpim:history`, `mpim:read`
   - `chat:write`, `reactions:read`, `reactions:write`, `files:read`, `files:write`
-  - `users:read`, `emoji:read`, `team:read`
+  - `users:read`, `emoji:read`, `team:read`, `usergroups:read` (names of user groups in `<!subteam^…>` mentions)
 - User events (`settings.event_subscriptions.user_events`):
   - `message.channels`, `message.groups`, `message.im`, `message.mpim`
   - `reaction_added`, `reaction_removed`
