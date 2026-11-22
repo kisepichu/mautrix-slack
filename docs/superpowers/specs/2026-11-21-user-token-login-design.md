@@ -182,9 +182,16 @@ A new file. The existing `app-manifest.yaml` (bot) stays unchanged.
 
 ## Error handling
 
-- **Revoked or invalid token** (`invalid_auth`, `token_revoked`, `account_inactive`, also when an admin removes the
-  app): keep upstream's handling. The login is invalidated and a bad-credentials bridge state is sent. No automatic
-  re-login.
+- **Revoked or invalid token** (`invalid_auth`, `not_authed`, `token_revoked`, `token_expired`, `account_inactive`,
+  `team_disabled`, `user_removed_from_team`, also when an admin removes the app): the login is invalidated (or
+  disconnected until restart, for the account and team codes) and a bad-credentials bridge state is sent. No
+  automatic re-login. Upstream does this only when connecting fails, so running app logins also detect revocation:
+  - A credential error from Socket Mode ends the connection and invalidates the login, instead of retrying every
+    10 seconds with a transient-disconnect state.
+  - An `auth.test` runs on every Socket Mode connection, because Socket Mode uses only the app-level token. A
+    revoked bot or user token is noticed at the next connection at the latest; Slack refreshes Socket Mode
+    connections periodically. Other `auth.test` errors are logged and the login keeps running.
+  - Both use `isSlackCredentialError` (`pkg/connector/client.go`) and `handleConnectError`.
 - **Logout**: upstream does not revoke app tokens. This stays as it is. Users revoke the tokens or uninstall the app
   in Slack.
 - **Send failures**: unchanged. They are reported through the bridge's message status and error notices.

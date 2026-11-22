@@ -185,6 +185,7 @@ func (s *SlackClient) HandleSocketModeEvent(ctx context.Context, evt socketmode.
 		s.socketGap.lost(time.Now())
 	case socketmode.EventTypeConnected:
 		s.UserLogin.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
+		go s.checkAuthOnSocketModeConnect(ctx)
 		if s.socketGap.reconnected(time.Now()) {
 			s.UserLogin.Log.Info().Msg("Socket Mode reconnected after a long disconnection, catching up")
 			s.triggerAppCatchUp(ctx)
@@ -205,6 +206,24 @@ func (s *SlackClient) HandleSocketModeEvent(ctx context.Context, evt socketmode.
 	}
 	if evt.Request != nil && evt.Request.EnvelopeID != "" {
 		s.SocketMode.Ack(*evt.Request)
+	}
+}
+
+// checkAuthOnSocketModeConnect calls auth.test after Socket Mode connects. Socket Mode only uses the app-level
+// token, so this notices a revoked bot or user token (or a removed app) while the login is running.
+func (s *SlackClient) checkAuthOnSocketModeConnect(ctx context.Context) {
+	cli := s.Client
+	if cli == nil {
+		return
+	}
+	_, err := cli.AuthTestContext(ctx)
+	if err == nil {
+		return
+	}
+	if isSlackCredentialError(err) {
+		s.handleConnectError(ctx, err, 0)
+	} else if ctx.Err() == nil {
+		s.UserLogin.Log.Warn().Err(err).Msg("Failed to check token after Socket Mode connected")
 	}
 }
 

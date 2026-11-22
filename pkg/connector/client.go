@@ -246,6 +246,18 @@ func (s *SlackClient) handleConnectError(ctx context.Context, err error, attempt
 	return false
 }
 
+// isSlackCredentialError reports whether err means the login's tokens are no longer usable, so that
+// reconnecting cannot help. handleConnectError invalidates the login or disconnects until restart for these.
+func isSlackCredentialError(err error) bool {
+	switch slackAPIErrorCode(err) {
+	case "invalid_auth", "not_authed", "token_revoked", "token_expired",
+		"account_inactive", "team_disabled", "user_removed_from_team":
+		return true
+	default:
+		return false
+	}
+}
+
 func connectRetryDelay(attempt int, err error) time.Duration {
 	maxDelay := min(2*time.Second<<min(attempt, 8), 5*time.Minute)
 	delay := maxDelay/2 + rand.N(maxDelay/2)
@@ -486,6 +498,10 @@ func (s *SlackClient) runSocketMode(ctx context.Context, cancel context.CancelFu
 		err := s.SocketMode.RunContext(ctx)
 		//lint:ignore SA4023 -
 		if err != nil {
+			if isSlackCredentialError(err) {
+				s.handleConnectError(ctx, err, 0)
+				return
+			}
 			log.Err(err).Msg("Error in socket mode connection")
 			s.UserLogin.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateTransientDisconnect,
